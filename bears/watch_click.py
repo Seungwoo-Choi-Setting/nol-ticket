@@ -1,4 +1,4 @@
-"""NOL 좌석 감시: 잔여수가 SEAT_COUNT 이상인 등급이 생기면 좌석 등급 -> 자동 배정받기 -> 수량 +(SEAT_COUNT회) -> 선택 완료 순서로 클릭.
+"""NOL 좌석 감시: 잔여수가 SEAT_COUNT_MIN 이상인 등급이 생기면 좌석 등급 -> 자동 배정받기 -> 수량 + (min(잔여수, SEAT_COUNT_MAX)회) -> 선택 완료 순서로 클릭.
 
 run.ps1이 디버그 포트(9222)로 띄운 Chrome에 붙어서 동작한다.
 이동/로그인/캡차는 직접 하고, 이 스크립트는 열려 있는 모든 탭의 좌석 목록만 지켜본다.
@@ -33,14 +33,14 @@ SEAT_ITEM = 'button[class*="SportsSeatGradeList_contentItem__"]'
 # 제외: 등급 이름에 이 글자 중 하나라도 들어가면 누르지 않음 (비우면 제외 없음). 예: ["휠체어", "시야방해"]
 # 둘 다 지정하면 포함 조건을 먼저 만족한 뒤 제외 조건에 걸리는 것을 뺀다.
 INCLUDE_TEXTS = ["1루", "중앙", "익사이팅"]
-EXCLUDE_TEXTS = ["휠체어", "시야방해"]
+EXCLUDE_TEXTS = ["휠체어", "시야방해", "외야"]
 # 우선순위: 조건에 맞는 후보가 여러 개일 때 먼저 누를 순서. 앞에 쓴 글자일수록 우선이다.
-#  - 후보는 포함/제외/SEAT_COUNT 조건을 이미 통과한 등급만이고, 우선순위는 그중에서 고르는 데만 쓰인다.
+#  - 후보는 포함/제외/SEAT_COUNT_MIN 조건을 이미 통과한 등급만이고, 우선순위는 그중에서 고르는 데만 쓰인다.
 #  - 이름에 여러 글자가 들어 있으면 가장 앞 순번을 따른다. 어느 글자에도 안 걸리면 맨 뒤.
 #  - 같은 순위끼리는 목록 위쪽이 먼저. 비우면 전부 목록 위쪽부터. 예: ["익사이팅", "중앙", "1루"]
 PRIORITY_TEXTS = []
 REMAIN_COUNT = '[class*="contentRemainCount"]'  # 등급 버튼 안의 잔여수 글자
-# 잔여수가 1 이상인 좌석 중 포함/제외 조건에 맞는 것 (SEAT_COUNT 이상인지는 코드에서 숫자로 따로 확인)
+# 잔여수가 1 이상인 좌석 중 포함/제외 조건에 맞는 것 (SEAT_COUNT_MIN 이상인지는 코드에서 숫자로 따로 확인)
 SEAT_AVAILABLE = (
     SEAT_ITEM
     + (":is(" + ", ".join(f':has-text("{t}")' for t in INCLUDE_TEXTS) + ")" if INCLUDE_TEXTS else "")
@@ -49,19 +49,21 @@ SEAT_AVAILABLE = (
 )
 
 # ---- 예매 수량 ----
-# 필요한 좌석 수. 두 곳에 쓰인다.
-#  1) 감지: 등급의 잔여수가 SEAT_COUNT 이상일 때만 잡는다 (예: 2이면 잔여 1은 무시, 2 이상에서 감지)
-#  2) 클릭: 수량 + 버튼을 SEAT_COUNT번 누른다 (수량은 0에서 시작하므로 누른 횟수 = 수량)
-# 사이트의 1회 최대 수량을 넘기면 + 버튼이 비활성화되어 해당 단계가 실패한다.
-SEAT_COUNT = 1
-assert SEAT_COUNT >= 1, "SEAT_COUNT는 1 이상이어야 한다"
+# 잡은 등급의 잔여수에 따라 예매 수량이 정해진다: 수량 = min(잔여수, SEAT_COUNT_MAX)
+#  - SEAT_COUNT_MIN: 잔여수가 이 값 미만이면 잡지 않는다 (예: 2이면 잔여 1은 무시)
+#  - SEAT_COUNT_MAX: 잔여가 이보다 많아도 이 수만큼만 예매한다
+#  예) MIN=1, MAX=2 -> 잔여 1이면 1자리, 잔여 2 이상이면 2자리
+#  예) MIN=2, MAX=2 -> 잔여 2 이상일 때만 2자리 (잔여 1은 무시)
+#  예) MIN=MAX=N    -> 항상 N자리, 잔여 N 이상일 때만 잡음
+# 수량은 0에서 시작해서 + 버튼을 누른 횟수만큼 된다. 사이트의 1회 최대 수량을 넘기면 + 버튼이 비활성화되어 해당 단계가 실패한다.
+SEAT_COUNT_MIN = 1
+SEAT_COUNT_MAX = 2
+assert 1 <= SEAT_COUNT_MIN <= SEAT_COUNT_MAX, "1 <= SEAT_COUNT_MIN <= SEAT_COUNT_MAX 여야 한다"
 
 # ---- 좌석 클릭 후 순서대로 누를 버튼: (css selector, 글자 정규식 or None) ----
-STEPS = [
-    ("button", r"자동\s*배정"),                                    # 1) 자동 배정받기
-    *[(".nds-e-stepper__incrementButton", None)] * SEAT_COUNT,    # 2) 수량 + (SEAT_COUNT회, 0 -> N)
-    ("button", r"선택\s*완료"),                                    # 3) 선택 완료 (데스크톱 xxlarge / 시트 large 둘 다)
-]
+STEPS_BEFORE = [("button", r"자동\s*배정")]                  # 1) 자동 배정받기
+STEP_INCREMENT = (".nds-e-stepper__incrementButton", None)  # 2) 수량 + (수량만큼 반복, 0 -> N)
+STEPS_AFTER = [("button", r"선택\s*완료")]                   # 3) 선택 완료 (데스크톱 xxlarge / 시트 large 둘 다)
 
 # ---- 실패 진단 ----
 DIAG_SELECTOR = 'button, [role="button"], a'  # 실패 시 화면에서 기록할 요소
@@ -123,8 +125,8 @@ class SeatList:
         low = text.lower()
         return next((j for j, t in enumerate(PRIORITY_TEXTS) if t.lower() in low), len(PRIORITY_TEXTS))
 
-    def click_available(self, page: Page) -> str | None:
-        """잔여수가 SEAT_COUNT 이상인 후보 중 우선순위가 가장 높은 등급을 클릭하고 '등급명 | 잔여수'를 반환. 없으면 None."""
+    def click_available(self, page: Page) -> int | None:
+        """잔여수가 SEAT_COUNT_MIN 이상인 후보 중 우선순위가 가장 높은 등급을 클릭하고 예매할 수량을 반환. 없으면 None."""
         candidates = page.locator(SEAT_AVAILABLE)  # 잔여 1 이상 + 포함/제외 조건
         if candidates.count() == 0:  # 대기 없이 즉시 확인
             self.skipped = None
@@ -132,20 +134,21 @@ class SeatList:
         # 후보 전부의 [전체 글자, 잔여수 글자]를 한 번에 읽는다
         rows = candidates.evaluate_all(
             "(els, sel) => els.map(e => [e.innerText, (e.querySelector(sel) || {}).innerText || ''])", REMAIN_COUNT)
-        ok, short = [], []  # SEAT_COUNT 이상인 후보 / 모자란 후보
+        ok, short = [], []  # SEAT_COUNT_MIN 이상인 후보 / 모자란 후보: (우선순위, 목록 순번, 이름, 잔여수)
         for i, (text, remain_text) in enumerate(rows):
             remain = int(re.sub(r"\D", "", remain_text) or 0)  # "1,605" -> 1605
             name = text.replace("\n", " | ")
-            (ok if remain >= SEAT_COUNT else short).append((self._priority_rank(text), i, name))
+            (ok if remain >= SEAT_COUNT_MIN else short).append((self._priority_rank(text), i, name, remain))
         if ok:
-            rank, i, name = min(ok)  # 우선순위가 높은 것, 같으면 목록 위쪽
+            rank, i, name, remain = min(ok)  # 우선순위가 높은 것, 같으면 목록 위쪽
+            qty = min(remain, SEAT_COUNT_MAX)  # 잔여가 적으면 그만큼만, 많으면 MAX까지
             candidates.nth(i).click(force=True, timeout=SEAT_CLICK_TIMEOUT_MS)
             why = f" | priority #{rank + 1} '{PRIORITY_TEXTS[rank]}'" if rank < len(PRIORITY_TEXTS) else ""
-            log("SEAT CLICKED:", name + why, "| tab:", page.url)
-            return name
-        summary = " ; ".join(name for _, _, name in short)
+            log("SEAT CLICKED:", name + why, f"| qty {qty}", "| tab:", page.url)
+            return qty
+        summary = " ; ".join(name for _, _, name, _ in short)
         if summary != self.skipped:  # 같은 내용은 한 번만 기록
-            log(f"SEAT SKIPPED (remain < SEAT_COUNT={SEAT_COUNT}):", summary)
+            log(f"SEAT SKIPPED (remain < SEAT_COUNT_MIN={SEAT_COUNT_MIN}):", summary)
             self.skipped = summary
         return None
 
@@ -154,7 +157,7 @@ class SeatList:
 # 좌석 클릭 후 단계
 # ============================================================================
 class StepRunner:
-    """STEPS를 순서대로 클릭한다. 실패하면 로그를 남기고 멈춘다 (좌석을 다시 누르지 않도록)."""
+    """수량에 맞춘 단계(자동 배정받기 -> 수량 + x N -> 선택 완료)를 클릭한다. 실패하면 로그를 남기고 멈춘다 (좌석을 다시 누르지 않도록)."""
 
     # css selector와 글자 정규식으로 버튼 locator를 만든다
     @staticmethod
@@ -162,21 +165,27 @@ class StepRunner:
         loc = page.locator(sel)
         return loc.filter(has_text=re.compile(pat)) if pat else loc
 
+    # 수량 qty에 맞는 전체 단계 목록: 앞 단계 + 수량 + (qty회) + 뒤 단계
+    @staticmethod
+    def steps_for(qty: int) -> list[tuple[str, str | None]]:
+        return [*STEPS_BEFORE, *[STEP_INCREMENT] * qty, *STEPS_AFTER]
+
     # 단계를 순서대로 클릭하고 단계별/누적 시간을 로그로 남김
-    def run(self, page: Page):
+    def run(self, page: Page, qty: int):
+        steps = self.steps_for(qty)
         t_seat = time.perf_counter()
-        for n, (sel, pat) in enumerate(STEPS, 1):
+        for n, (sel, pat) in enumerate(steps, 1):
             t0 = time.perf_counter()
             try:  # 일반 click: 보이고 활성화될 때까지 대기
                 self._locator(page, sel, pat).first.click(timeout=STEP_TIMEOUT_MS)
             except Error as e:
-                self._log_failure(page, n, sel, pat, e)
+                self._log_failure(page, n, len(steps), sel, pat, e)
                 return
-            log(f"STEP {n}/{len(STEPS)} OK: {(time.perf_counter() - t0) * 1000:.0f}ms step, "
+            log(f"STEP {n}/{len(steps)} OK: {(time.perf_counter() - t0) * 1000:.0f}ms step, "
                 f"{(time.perf_counter() - t_seat) * 1000:.0f}ms since seat click | {sel} {pat or ''}")
 
     @staticmethod
-    def _log_failure(page: Page, n: int, sel: str, pat: str | None, err: Exception):
+    def _log_failure(page: Page, n: int, total: int, sel: str, pat: str | None, err: Exception):
         """실패한 단계와 그때 화면의 버튼 목록, 스크린샷을 남긴다."""
         try:
             buttons = page.eval_on_selector_all(
@@ -186,7 +195,7 @@ class StepRunner:
                 DIAG_EXCLUDE_CLASS)
         except Error as e:
             buttons = f"(n/a: {str(e).splitlines()[0]})"
-        log(f"STEP {n}/{len(STEPS)} FAILED\n  selector: {sel} text: {pat}\n  tab: {page.url}\n"
+        log(f"STEP {n}/{total} FAILED\n  selector: {sel} text: {pat}\n  tab: {page.url}\n"
             f"  error: {err}\n  buttons on screen: {buttons}")
         try:
             page.screenshot(path=str(SCREENSHOT_FILE))
@@ -222,10 +231,11 @@ class Watcher:
     def _check(self, page: Page):
         if self.seats.update_state(page):
             self.last_retry = None  # 복구 후 같은 에러가 또 나면 다시 기록
-        if self.seats.click_available(page) is None:
+        qty = self.seats.click_available(page)
+        if qty is None:
             return
         page.bring_to_front()
-        self.steps.run(page)
+        self.steps.run(page, qty)
         log("DONE. holding browser (Ctrl+C to quit)")
         page.wait_for_timeout(10**9)
 

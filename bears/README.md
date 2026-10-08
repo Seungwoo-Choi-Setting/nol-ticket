@@ -1,9 +1,9 @@
 # NOL 좌석 감시 (bears)
 
-NOL 티켓(`tickets.interpark.com`) 좌석 선택 화면을 지켜보다가, 잔여수가 필요한 좌석 수(`SEAT_COUNT`) 이상인 등급이 생기면 아래 순서로 자동 클릭한다.
+NOL 티켓(`tickets.interpark.com`) 좌석 선택 화면을 지켜보다가, 잔여수가 `SEAT_COUNT_MIN` 이상인 등급이 생기면 아래 순서로 자동 클릭한다. 예매 수량은 잔여수에 맞춰 정해진다(`min(잔여수, SEAT_COUNT_MAX)`).
 
 ```
-좌석 등급(잔여수 ≥ SEAT_COUNT인 일반석) → 자동 배정받기 → 수량 + (SEAT_COUNT회) → 선택 완료
+좌석 등급(잔여수 ≥ SEAT_COUNT_MIN인 일반석) → 자동 배정받기 → 수량 + (min(잔여수, SEAT_COUNT_MAX)회) → 선택 완료
 ```
 
 - 새로고침은 하지 않는다. 페이지가 스스로 숫자를 갱신해야 감지된다.
@@ -49,7 +49,7 @@ powershell -ExecutionPolicy Bypass -File .\run.ps1
 3. PowerShell로 돌아와 Enter를 누른다.
 4. 좌석 목록 화면까지 직접 이동하고 캡차를 통과한다.
 5. 터미널에 `START watching ...`이 뜬 상태로 두면 감시 중이다. 조용한 것이 정상이다.
-6. 잔여수가 `SEAT_COUNT` 이상인 등급이 생기면 자동으로 클릭하고 `DONE`이 찍힌다. 이후 좌석 선택과 결제는 직접 한다.
+6. 잔여수가 `SEAT_COUNT_MIN` 이상인 등급이 생기면 자동으로 클릭하고 `DONE`이 찍힌다. 이후 좌석 선택과 결제는 직접 한다.
 7. 종료는 `Ctrl+C`.
 
 
@@ -71,9 +71,20 @@ powershell -ExecutionPolicy Bypass -File .\run.ps1
 | `INCLUDE_TEXTS` | 이름에 이 글자 중 **하나라도** 들어간 등급만 누름. 리스트로 여러 개 지정 (비우면 `[]` = 모든 등급이 대상) |
 | `EXCLUDE_TEXTS` | 이름에 이 글자 중 **하나라도** 들어간 등급은 누르지 않음. 리스트로 여러 개 지정 (비우면 제외 없음) |
 | `PRIORITY_TEXTS` | 후보가 여러 개일 때 누를 순서. **앞에 쓴 글자일수록 우선** (비우면 `[]` = 목록 위쪽부터). 아래 '우선순위' 참고 |
-| `SEAT_COUNT` | 필요한 좌석 수 (기본 `1`). ① **감지**: 등급의 잔여수가 이 값 **이상**일 때만 잡음 (`2`이면 잔여 1은 무시) ② **클릭**: 수량 + 버튼을 이 횟수만큼 누름. 사이트의 1회 최대 수량을 넘기면 + 버튼이 비활성화되어 단계가 실패함 |
-| `STEPS` | 좌석 클릭 후 누를 버튼 순서 `(css selector, 글자 정규식)`. 수량 + 버튼은 `SEAT_COUNT`번 자동 반복됨 |
-| `SEAT_ITEM` / `SEAT_AVAILABLE` | 좌석 등급 버튼 선택자. `SEAT_AVAILABLE`은 `INCLUDE_TEXTS`, `EXCLUDE_TEXTS`, 잔여수 1 이상으로 자동 조립됨 (`SEAT_COUNT` 이상인지는 코드에서 숫자로 따로 확인) |
+| `SEAT_COUNT_MIN` | **감지 하한.** 등급의 잔여수가 이 값 **이상**일 때만 잡음 (`2`이면 잔여 1은 무시) |
+| `SEAT_COUNT_MAX` | **예매 수량 상한.** 수량 = `min(잔여수, SEAT_COUNT_MAX)`. 잔여가 더 많아도 이만큼만 예매. 사이트의 1회 최대 수량을 넘기면 + 버튼이 비활성화되어 단계가 실패함 |
+| `STEPS_BEFORE` / `STEP_INCREMENT` / `STEPS_AFTER` | 좌석 클릭 후 누를 버튼 `(css selector, 글자 정규식)`. 전체 순서는 `STEPS_BEFORE` → `STEP_INCREMENT`를 **수량만큼 반복** → `STEPS_AFTER` |
+| `SEAT_ITEM` / `SEAT_AVAILABLE` | 좌석 등급 버튼 선택자. `SEAT_AVAILABLE`은 `INCLUDE_TEXTS`, `EXCLUDE_TEXTS`, 잔여수 1 이상으로 자동 조립됨 (`SEAT_COUNT_MIN` 이상인지는 코드에서 숫자로 따로 확인) |
+
+수량 예시 (`SEAT_COUNT_MIN` / `SEAT_COUNT_MAX`):
+
+| 설정 | 잔여 1 | 잔여 2 | 잔여 5 |
+|---|---|---|---|
+| `1` / `2` | 1자리 | 2자리 | 2자리 |
+| `2` / `2` | 무시 | 2자리 | 2자리 |
+| `1` / `1` | 1자리 | 1자리 | 1자리 |
+| `1` / `3` | 1자리 | 2자리 | 3자리 |
+| `3` / `3` | 무시 | 무시 | 3자리 |
 | `REMAIN_COUNT` | 등급 버튼 안에서 잔여수가 적힌 요소의 선택자 |
 | `CDP_URL` | 붙을 Chrome 주소 (기본 `http://localhost:9222`, `run.ps1`의 포트와 같아야 함) |
 | `LOG_FILE` / `SCREENSHOT_FILE` | 로그 파일(`watch.log`)과 실패 시 스크린샷(`diag.png`) 경로 |
@@ -99,7 +110,7 @@ EXCLUDE_TEXTS = ["휠체어", "시야방해"]   # 그중 '휠체어' 또는 '시
 
 ### 우선순위
 
-포함/제외/`SEAT_COUNT` 조건을 **모두 통과한 후보가 여러 개**일 때 어느 것을 먼저 누를지 정한다.
+포함/제외/`SEAT_COUNT_MIN` 조건을 **모두 통과한 후보가 여러 개**일 때 어느 것을 먼저 누를지 정한다.
 
 ```python
 INCLUDE_TEXTS  = ["1루", "익사이팅", "중앙"]
@@ -111,7 +122,7 @@ PRIORITY_TEXTS = ["익사이팅", "중앙", "1루"]   # 익사이팅 > 중앙 > 
 - 우선순위 글자에 하나도 안 걸리는 후보는 **맨 뒤**다. 같은 순위끼리는 **목록 위쪽**이 먼저다.
 - 우선순위는 후보 중에서 고르는 데만 쓰인다. 제외 글자나 잔여 부족으로 후보에서 빠진 등급은 우선순위가 높아도 눌리지 않는다.
 - 우선순위 글자가 `INCLUDE_TEXTS`에 없어도 된다. 다만 후보가 아니면 아무 효과가 없다.
-- 클릭하면 로그에 어떤 우선순위가 적용됐는지 남는다: `SEAT CLICKED: NOL존(1루 익사이팅존) | 5 | priority #1 '익사이팅'`.
+- 클릭하면 로그에 어떤 우선순위가 적용됐는지 남는다: `SEAT CLICKED: NOL존(1루 익사이팅존) | 5 | priority #1 '익사이팅' | qty 2 | tab: ...`.
 
 예시 (후보가 `NOL존(1루 익사이팅존)`, `중앙 네이비석`, `DB손해보험존(1루 테이블석)`이고 모두 잔여가 있을 때):
 
@@ -132,9 +143,9 @@ PRIORITY_TEXTS = ["익사이팅", "중앙", "1루"]   # 익사이팅 > 중앙 > 
 | `SEAT LIST FOUND (N items)` | 좌석 목록이 보이기 시작함 (감시 재개) |
 | `SEAT LIST LOST` | 좌석 목록이 사라짐 (이동, 10분 타임아웃으로 튕김 등) |
 | `RETRY: ...` | 탭 이동 중 등 일시적 에러. 같은 메시지는 연속으로 한 번만 기록 |
-| `SEAT SKIPPED (remain < SEAT_COUNT=N): ...` | 잔여는 있지만 `SEAT_COUNT`에 모자라서 무시한 등급. 같은 내용은 한 번만 기록 |
-| `SEAT CLICKED: <등급 \| 잔여수> [\| priority #n '글자']` | 잔여수가 `SEAT_COUNT` 이상인 후보 중 우선순위가 가장 높은 등급을 클릭함. 우선순위 글자에 걸렸으면 몇 번째였는지 함께 표시 |
-| `STEP n/N OK: ...` | n번째 단계 성공 (단계 시간, 좌석 클릭 후 누적 시간). N은 전체 단계 수 = 2 + `SEAT_COUNT` |
+| `SEAT SKIPPED (remain < SEAT_COUNT_MIN=N): ...` | 잔여는 있지만 `SEAT_COUNT_MIN`에 모자라서 무시한 등급. 같은 내용은 한 번만 기록 |
+| `SEAT CLICKED: <등급 \| 잔여수> [\| priority #n '글자'] \| qty Q` | 잔여수가 `SEAT_COUNT_MIN` 이상인 후보 중 우선순위가 가장 높은 등급을 클릭함. `qty`는 예매할 수량(`min(잔여수, SEAT_COUNT_MAX)`). 우선순위 글자에 걸렸으면 몇 번째였는지 함께 표시 |
+| `STEP n/N OK: ...` | n번째 단계 성공 (단계 시간, 좌석 클릭 후 누적 시간). N은 전체 단계 수 = 2 + 수량(`qty`) |
 | `STEP n/N FAILED` | 실패한 단계, 에러, 화면의 버튼 목록. `diag.png`도 저장 |
 | `DONE. holding browser` | 단계 종료. 브라우저는 열어둠 |
 | `STOPPED by Ctrl+C` / `CRASHED` | 종료 / 예상 못 한 에러(traceback 포함) |
@@ -145,7 +156,7 @@ PRIORITY_TEXTS = ["익사이팅", "중앙", "1루"]   # 익사이팅 > 중앙 > 
 |---|---|
 | `Python` 한 줄만 나오고 끝남 | Windows Store 가짜 `python`이 잡힌 것. `run.ps1`은 `py` 런처를 쓰므로 `py --version`이 되는지 확인 |
 | 접속 오류 (`connect_over_cdp`) | Chrome이 디버그 포트 없이 이미 떠 있음. Chrome을 완전히 닫고 `run.ps1`로 다시 실행 |
-| `STEP n/N FAILED` | 로그의 `buttons on screen`에서 실제 버튼 글자와 클래스를 확인해 `STEPS`를 고침 |
+| `STEP n/N FAILED` | 로그의 `buttons on screen`에서 실제 버튼 글자와 클래스를 확인해 `STEPS_BEFORE` / `STEP_INCREMENT` / `STEPS_AFTER`를 고침 |
 | 처음 한 번 Google 로그인 차단 | 이 방식(일반 Chrome 접속)을 써야 함. Playwright로 직접 띄운 브라우저는 차단됨 |
 | 한글이 깨져 보임 | `.ps1`은 UTF-8 BOM으로 저장해야 한다. BOM 없이 저장하면 PowerShell 5.1에서 깨짐 |
 

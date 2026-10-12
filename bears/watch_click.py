@@ -11,7 +11,7 @@ import traceback
 from datetime import datetime
 from pathlib import Path
 
-from playwright.sync_api import Error, Page, sync_playwright
+from playwright.sync_api import Error, Page, expect, sync_playwright
 
 # ============================================================================
 # 설정 (바꿀 값은 전부 여기)
@@ -23,7 +23,7 @@ SCREENSHOT_FILE = BASE_DIR / "diag.png"  # 단계 실패 시 화면 저장
 
 # ---- 브라우저 / 타이밍 ----
 CDP_URL = "http://localhost:9222"  # run.ps1이 디버그 포트로 띄운 Chrome
-POLL_SEC = 0.3                     # 좌석 목록 확인 간격
+POLL_SEC = 0.1                     # 좌석 목록 확인 간격
 SEAT_CLICK_TIMEOUT_MS = 3000       # 좌석 등급 클릭 한도
 STEP_TIMEOUT_MS = 10_000           # 클릭 후 단계별 버튼 대기 한도
 
@@ -128,12 +128,14 @@ class SeatList:
     def click_available(self, page: Page) -> int | None:
         """잔여수가 SEAT_COUNT_MIN 이상인 후보 중 우선순위가 가장 높은 등급을 클릭하고 예매할 수량을 반환. 없으면 None."""
         candidates = page.locator(SEAT_AVAILABLE)  # 잔여 1 이상 + 포함/제외 조건
-        if candidates.count() == 0:  # 대기 없이 즉시 확인
-            self.skipped = None
-            return None
-        # 후보 전부의 [전체 글자, 잔여수 글자]를 한 번에 읽는다
+        t_read = time.perf_counter()
+        # 후보 전부의 [전체 글자, 잔여수 글자]를 한 번에 읽는다 (후보 없으면 빈 목록: count 왕복 생략)
         rows = candidates.evaluate_all(
             "(els, sel) => els.map(e => [e.innerText, (e.querySelector(sel) || {}).innerText || ''])", REMAIN_COUNT)
+        if not rows:
+            self.skipped = None
+            return None
+        read_ms = (time.perf_counter() - t_read) * 1000
         ok, short = [], []  # SEAT_COUNT_MIN 이상인 후보 / 모자란 후보: (우선순위, 목록 순번, 이름, 잔여수)
         for i, (text, remain_text) in enumerate(rows):
             remain = int(re.sub(r"\D", "", remain_text) or 0)  # "1,605" -> 1605
@@ -142,9 +144,11 @@ class SeatList:
         if ok:
             rank, i, name, remain = min(ok)  # 우선순위가 높은 것, 같으면 목록 위쪽
             qty = min(remain, SEAT_COUNT_MAX)  # 잔여가 적으면 그만큼만, 많으면 MAX까지
-            candidates.nth(i).click(force=True, timeout=SEAT_CLICK_TIMEOUT_MS)
+            t_click = time.perf_counter()
+            candidates.nth(i).click(force=True, no_wait_after=True, timeout=SEAT_CLICK_TIMEOUT_MS)
+            click_ms = (time.perf_counter() - t_click) * 1000
             why = f" | priority #{rank + 1} '{PRIORITY_TEXTS[rank]}'" if rank < len(PRIORITY_TEXTS) else ""
-            log("SEAT CLICKED:", name + why, f"| qty {qty}", "| tab:", page.url)
+            log("SEAT CLICKED:", name + why, f"| qty {qty}", f"| read {read_ms:.0f}ms click {click_ms:.0f}ms", "| tab:", page.url)
             return qty
         summary = " ; ".join(name for _, _, name, _ in short)
         if summary != self.skipped:  # 같은 내용은 한 번만 기록
@@ -173,12 +177,20 @@ class StepRunner:
     # 단계를 순서대로 클릭하고 단계별/누적 시간을 로그로 남김
     def run(self, page: Page, qty: int):
         steps = self.steps_for(qty)
+        last = len(steps)
         t_seat = time.perf_counter()
         for n, (sel, pat) in enumerate(steps, 1):
             t0 = time.perf_counter()
-            try:  # 일반 click: 보이고 활성화될 때까지 대기
-                self._locator(page, sel, pat).first.click(timeout=STEP_TIMEOUT_MS)
-            except Error as e:
+            try:
+                btn = self._locator(page, sel, pat).first
+                if n == last:  # 마지막 단계: 활성화만 확인하고 '안정될 때까지 대기'(약 1초)는 건너뜀. 실제 마우스 클릭이라 isTrusted 유지
+                    expect(btn).to_be_enabled(timeout=STEP_TIMEOUT_MS)
+                    t_clk = time.perf_counter()
+                    btn.click(force=True, no_wait_after=True, timeout=STEP_TIMEOUT_MS)
+                    log(f"STEP {n} detail: wait {(t_clk - t0) * 1000:.0f}ms click {(time.perf_counter() - t_clk) * 1000:.0f}ms")
+                else:  # 일반 click: 보이고 활성화될 때까지 대기. no_wait_after: 클릭 뒤 화면 이동 대기(약 1초)를 건너뜀
+                    btn.click(no_wait_after=True, timeout=STEP_TIMEOUT_MS)
+            except (Error, AssertionError) as e:
                 self._log_failure(page, n, len(steps), sel, pat, e)
                 return
             log(f"STEP {n}/{len(steps)} OK: {(time.perf_counter() - t0) * 1000:.0f}ms step, "
@@ -219,6 +231,13 @@ class Watcher:
     # 열린 모든 탭을 POLL_SEC 간격으로 무한 순회
     def run(self):
         log("START watching all tabs for available seats | tabs:", [pg.url for pg in self.ctx.pages])
+        if self.ctx.pages:  # Python <-> Chrome(CDP) 왕복 시간: 호출 1번당 이만큼은 기본으로 든다
+            rtt = []
+            for _ in range(10):
+                t = time.perf_counter()
+                self.ctx.pages[0].evaluate("1")
+                rtt.append((time.perf_counter() - t) * 1000)
+            log(f"CDP roundtrip: min {min(rtt):.1f}ms avg {sum(rtt) / len(rtt):.1f}ms max {max(rtt):.1f}ms")
         while True:
             for page in self.ctx.pages:
                 try:

@@ -32,8 +32,9 @@ SEAT_ITEM = 'button[class*="SportsSeatGradeList_contentItem__"]'
 # 포함: 등급 이름에 이 글자 중 하나라도 들어간 것만 누름 (비우면 모든 등급이 대상). 예: ["외야", "네이비"]
 # 제외: 등급 이름에 이 글자 중 하나라도 들어가면 누르지 않음 (비우면 제외 없음). 예: ["휠체어", "시야방해"]
 # 둘 다 지정하면 포함 조건을 먼저 만족한 뒤 제외 조건에 걸리는 것을 뺀다.
-INCLUDE_TEXTS = ["1루", "중앙", "익사이팅"]
-EXCLUDE_TEXTS = ["휠체어", "시야방해", "외야"]
+# INCLUDE_TEXTS = ["3루", "중앙"]
+INCLUDE_TEXTS = []
+EXCLUDE_TEXTS = ["휠체어"]
 # 우선순위: 조건에 맞는 후보가 여러 개일 때 먼저 누를 순서. 앞에 쓴 글자일수록 우선이다.
 #  - 후보는 포함/제외/SEAT_COUNT_MIN 조건을 이미 통과한 등급만이고, 우선순위는 그중에서 고르는 데만 쓰인다.
 #  - 이름에 여러 글자가 들어 있으면 가장 앞 순번을 따른다. 어느 글자에도 안 걸리면 맨 뒤.
@@ -56,7 +57,7 @@ SEAT_AVAILABLE = (
 #  예) MIN=2, MAX=2 -> 잔여 2 이상일 때만 2자리 (잔여 1은 무시)
 #  예) MIN=MAX=N    -> 항상 N자리, 잔여 N 이상일 때만 잡음
 # 수량은 0에서 시작해서 + 버튼을 누른 횟수만큼 된다. 사이트의 1회 최대 수량을 넘기면 + 버튼이 비활성화되어 해당 단계가 실패한다.
-SEAT_COUNT_MIN = 1
+SEAT_COUNT_MIN = 2
 SEAT_COUNT_MAX = 2
 assert 1 <= SEAT_COUNT_MIN <= SEAT_COUNT_MAX, "1 <= SEAT_COUNT_MIN <= SEAT_COUNT_MAX 여야 한다"
 
@@ -64,6 +65,16 @@ assert 1 <= SEAT_COUNT_MIN <= SEAT_COUNT_MAX, "1 <= SEAT_COUNT_MIN <= SEAT_COUNT
 STEPS_BEFORE = [("button", r"자동\s*배정")]                  # 1) 자동 배정받기
 STEP_INCREMENT = (".nds-e-stepper__incrementButton", None)  # 2) 수량 + (수량만큼 반복, 0 -> N)
 STEPS_AFTER = [("button", r"선택\s*완료")]                   # 3) 선택 완료 (데스크톱 xxlarge / 시트 large 둘 다)
+
+# ---- '남은시간 mm:ss' 버튼: 좌석보다 먼저 처리. 비활성(남은시간 글자)이 보인 뒤 활성화되면 바로 클릭 ----
+# 클래스 해시(_2p3w6_)는 배포마다 바뀔 수 있어 접두사만 쓴다. 활성화되면 글자가 바뀔 수 있어 활성 쪽은 글자를 안 본다.
+NEXT_BUTTON = 'button[class*="_primary_"]:not([disabled])'
+# 비활성 '남은시간' 버튼이 있으면 'wait', 활성 primary 버튼이 있으면 'ready', 없으면 null (왕복 1번)
+NEXT_STATE_JS = """() => {
+    const b = [...document.querySelectorAll('button[class*="_primary_"]')];
+    if (b.some(x => x.disabled && x.innerText.includes('남은시간'))) return 'wait';
+    return b.some(x => !x.disabled) ? 'ready' : null;
+}"""
 
 # ---- 실패 진단 ----
 DIAG_SELECTOR = 'button, [role="button"], a'  # 실패 시 화면에서 기록할 요소
@@ -226,7 +237,18 @@ class Watcher:
         self.ctx = ctx
         self.seats = SeatList()
         self.steps = StepRunner()
+        self.next_armed: dict[Page, bool] = {}  # 탭별: 비활성 '남은시간' 버튼을 본 적 있음
         self.last_retry: str | None = None  # 같은 에러 메시지는 연속으로 한 번만 기록
+
+    # 남은시간 버튼이 비활성으로 보였다가 활성화되면 클릭 (탭당 1회)
+    def _click_next(self, page: Page):
+        state = page.evaluate(NEXT_STATE_JS)
+        if state == "wait":
+            self.next_armed[page] = True
+        elif state == "ready" and self.next_armed.get(page):
+            self.next_armed[page] = False
+            page.locator(NEXT_BUTTON).first.click(force=True, no_wait_after=True, timeout=STEP_TIMEOUT_MS)
+            log("NEXT CLICKED | tab:", page.url)
 
     # 열린 모든 탭을 POLL_SEC 간격으로 무한 순회
     def run(self):
@@ -250,6 +272,7 @@ class Watcher:
     def _check(self, page: Page):
         if self.seats.update_state(page):
             self.last_retry = None  # 복구 후 같은 에러가 또 나면 다시 기록
+        self._click_next(page)  # 제일 먼저
         qty = self.seats.click_available(page)
         if qty is None:
             return
